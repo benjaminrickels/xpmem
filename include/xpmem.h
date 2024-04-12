@@ -76,6 +76,10 @@ enum {
 
 #if !defined(__KERNEL__)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * xpmem_version - get the XPMEM version
  *
@@ -188,6 +192,10 @@ void *xpmem_attach (struct xpmem_addr addr, size_t size, void *vaddr);
  *	Failure: -1
  */
 int xpmem_detach (void *vaddr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* !defined(__KERNEL__) */
 
