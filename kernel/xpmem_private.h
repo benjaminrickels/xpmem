@@ -263,6 +263,9 @@ struct xpmem_partition {
 #define XPMEM_NODE_OFFLINE		-2
 #define XPMEM_CPUS_OFFLINE		-2
 
+#define XPMEM_ACCESS			(XPMEM_RDONLY | XPMEM_RDWR)
+#define XPMEM_MODE_FLAGS		(XPMEM_ACCESS | XPMEM_UNIVERSAL)
+
 /* found in xpmem_make.c */
 extern int xpmem_make(u64, size_t, int, void *, xpmem_segid_t *);
 extern void xpmem_remove_segs_of_tg(struct xpmem_thread_group *);

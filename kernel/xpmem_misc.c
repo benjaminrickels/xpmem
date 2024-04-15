@@ -272,8 +272,8 @@ xpmem_validate_access(struct xpmem_access_permit *ap, off_t offset,
 		      size_t size, int mode, u64 *vaddr)
 {
 	/* ensure that this thread has permission to access segment */
-	if (current->tgid != ap->tg->tgid ||
-	    (mode == XPMEM_RDWR && ap->mode == XPMEM_RDONLY))
+	if ((current->tgid != ap->tg->tgid && !(ap->mode & XPMEM_UNIVERSAL)) ||
+	    ((mode & XPMEM_ACCESS) != (ap->mode & XPMEM_ACCESS)))
 		return -EACCES;
 
 	if (offset < 0 || size == 0 || offset + size > ap->seg->size)
