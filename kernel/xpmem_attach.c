@@ -244,6 +244,10 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		 */
 		return VM_FAULT_SIGBUS;
 	}
+
+	atomic_inc(&att->pfcnt);
+	XPMEM_DEBUG("pfs on vaddr %llx: %d", vaddr, atomic_read(&att->pfcnt));
+
 	xpmem_att_ref(att);
 	ap = att->ap;
 	xpmem_ap_ref(ap);
@@ -370,8 +374,9 @@ out_1:
 			goto out;
 		}
 
-		XPMEM_DEBUG("calling remap_pfn_range() vaddr=%llx, pfn=%lx",
-				vaddr, pfn);
+		atomic_inc(&att->remapcnt);
+		XPMEM_DEBUG("calling remap_pfn_range() vaddr=%llx, pfn=%lx: %d",
+				vaddr, pfn, atomic_read(&att->remapcnt));
 		
 		ret = remap_pfn_range(vma, vaddr, pfn, PAGE_SIZE,
 				      vma->vm_page_prot);

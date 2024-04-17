@@ -228,6 +228,8 @@ struct xpmem_attachment {
 	struct vm_area_struct *at_vma;	/* vma where seg is attachment */
 	volatile int flags;	/* att attributes and state */
 	atomic_t refcnt;	/* references to att */
+	atomic_t pfcnt;
+	atomic_t remapcnt;
 	struct xpmem_access_permit *ap;/* associated access permit */
 	struct list_head att_list;	/* atts linked to access permit */
 	struct mm_struct *mm;	/* mm struct attached to */
