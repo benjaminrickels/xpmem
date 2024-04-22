@@ -95,10 +95,10 @@ xpmem_hugetlb_pte(pte_t *pte, struct mm_struct *mm, u64 vaddr, u64 *offset)
 #endif
 	}
 
-	if (offset) {
-		*offset = (vaddr & (page_size - 1)) & PAGE_MASK;
-	}
+	*offset = (vaddr & (page_size - 1)) & PAGE_MASK;
 
+	/* This should never be true as we only enter this function when
+	 * {pud,pmd}_present for pte is true, but we keep it just to be safe */
 	if (pte_none(*pte))
 		return NULL;
 
@@ -111,8 +111,11 @@ xpmem_hugetlb_pte(pte_t *pte, struct mm_struct *mm, u64 vaddr, u64 *offset)
  * pte if one is present.
  */
 static pte_t *
-xpmem_vaddr_to_pte_offset(struct mm_struct *mm, u64 vaddr, u64 *offset)
+xpmem_vaddr_to_pte(struct mm_struct *mm, u64 vaddr, u64 *offset, u64 *size)
 {
+	u64 loc_offset;
+	u64 loc_size;
+
 	pgd_t *pgd;
 	pud_t *pud;
 	pmd_t *pmd;
@@ -121,82 +124,23 @@ xpmem_vaddr_to_pte_offset(struct mm_struct *mm, u64 vaddr, u64 *offset)
 	p4d_t *p4d;
 #endif
 
-	if (offset)
-		/* if vaddr is not in a huge page it will always be at
-		 * offset 0 in the page. */
-		*offset = 0;
+	offset = offset ? offset : &loc_offset;
+	size = size ? size : &loc_size;
 
-	pgd = pgd_offset(mm, vaddr);
-	if (!pgd_present(*pgd))
-		return NULL;
-	/* NTH: there is no pgd_large in kernel 3.13. from what I have read
-	 * the pte is never folded into the pgd. */
+	/* if vaddr is not in a huge page it will always be at
+	 * offset 0 in the page. */
+	*offset = 0;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-	/* 4.12+ has another level to the page tables */
-	p4d = p4d_offset(pgd, vaddr);
-	if (!p4d_present(*p4d)) {
-		return NULL;
-        }
-
-	pud = pud_offset(p4d, vaddr);
-#else
-	pud = pud_offset(pgd, vaddr);
-#endif
-	if (!pud_present(*pud))
-		return NULL;
-#if CONFIG_HUGETLB_PAGE
-	else if (pud_is_huge(*pud)) {
-		/* pte folded into the pmd which is folded into the pud */
-		return xpmem_hugetlb_pte((pte_t *) pud, mm, vaddr, offset);
-	}
-#endif
-
-	pmd = pmd_offset(pud, vaddr);
-	if (!pmd_present(*pmd))
-		return NULL;
-#if CONFIG_HUGETLB_PAGE
-	else if (pmd_is_huge(*pmd)) {
-		/* pte folded into the pmd */
-		return xpmem_hugetlb_pte((pte_t *) pmd, mm, vaddr, offset);
-	}
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-	pte = pte_offset_kernel(pmd, vaddr);
-#else
-	pte = pte_offset_map(pmd, vaddr);
-#endif
-	if (!pte_present(*pte))
-		return NULL;
-
-	return pte;
-}
-
-/*
- * This is similar to xpmem_vaddr_to_pte_offset, except it should
- * only be used for areas mapped with base pages. Specifically, it is used
- * for XPMEM attachments since we know XPMEM created those mappings with base
- * pages. The size argument is used to determine at which level of the page
- * tables an invalid entry was found. This is used by xpmem_unpin_pages. size
- * must always be a valid pointer.
- */
-static pte_t *
-xpmem_vaddr_to_pte_size(struct mm_struct *mm, u64 vaddr, u64 *size)
-{
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-	p4d_t *p4d;
-#endif
+	/* init size with 0, will only be used if we return NULL */
+	*size = 0;
 
 	pgd = pgd_offset(mm, vaddr);
 	if (!pgd_present(*pgd)) {
 		*size = PGDIR_SIZE;
 		return NULL;
 	}
+	/* NTH: there is no pgd_large in kernel 3.13. from what I have read
+	 * the pte is never folded into the pgd. */
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 	/* 4.12+ has another level to the page tables */
@@ -214,11 +158,30 @@ xpmem_vaddr_to_pte_size(struct mm_struct *mm, u64 vaddr, u64 *size)
 		*size = PUD_SIZE;
 		return NULL;
 	}
+#if CONFIG_HUGETLB_PAGE
+	else if (pud_is_huge(*pud)) {
+		/* pte folded into the pmd which is folded into the pud */
+		pte = xpmem_hugetlb_pte((pte_t *) pud, mm, vaddr, offset);
+		if (!pte)
+			*size = PUD_SIZE;
+		return pte;
+	}
+#endif
+
 	pmd = pmd_offset(pud, vaddr);
 	if (!pmd_present(*pmd)) {
 		*size = PMD_SIZE;
 		return NULL;
 	}
+#if CONFIG_HUGETLB_PAGE
+	else if (pmd_is_huge(*pmd)) {
+		/* pte folded into the pmd */
+		pte = xpmem_hugetlb_pte((pte_t *) pmd, mm, vaddr, offset);
+		if (!pte)
+			*size = PMD_SIZE;
+		return pte;
+	}
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	pte = pte_offset_kernel(pmd, vaddr);
@@ -229,6 +192,7 @@ xpmem_vaddr_to_pte_size(struct mm_struct *mm, u64 vaddr, u64 *size)
 		*size = PAGE_SIZE;
 		return NULL;
 	}
+
 	return pte;
 }
 
@@ -271,7 +235,7 @@ xpmem_pin_page(struct xpmem_thread_group *tg, struct task_struct *src_task,
 	 * we might have to temporarily switch cpus to get the page
 	 * placed where we want it.
 	 */
-	if (xpmem_vaddr_to_pte_offset(src_mm, vaddr, NULL) == NULL &&
+	if (xpmem_vaddr_to_pte(src_mm, vaddr, NULL, NULL) == NULL &&
 	    cpu_to_node(task_cpu(current)) != cpu_to_node(task_cpu(src_task))) {
 #ifdef HAVE_STRUCT_TASK_STRUCT_CPUS_MASK
 		saved_mask = current->cpus_mask;
@@ -333,7 +297,7 @@ xpmem_unpin_pages(struct xpmem_segment *seg, struct mm_struct *mm,
 	vaddr &= PAGE_MASK;
 
 	while (n_pgs > 0) {
-		pte = xpmem_vaddr_to_pte_size(mm, vaddr, &vsize);
+		pte = xpmem_vaddr_to_pte(mm, vaddr, NULL, &vsize);
 
 		if (pte) {
 			DBUG_ON(!pte_present(*pte));
@@ -397,7 +361,7 @@ xpmem_vaddr_to_PFN(struct mm_struct *mm, u64 vaddr)
 	pte_t *pte;
 	u64 pfn, offset;
 
-	pte = xpmem_vaddr_to_pte_offset(mm, vaddr, &offset);
+	pte = xpmem_vaddr_to_pte(mm, vaddr, &offset, NULL);
 	if (pte == NULL)
 		return 0;
 	DBUG_ON(!pte_present(*pte));
