@@ -504,9 +504,6 @@ xpmem_attach(struct file *file, xpmem_apid_t apid, off_t offset, size_t size,
 	if (ret != 0)
 		goto out_2;
 
-	/* size needs to reflect page offset to start of segment */
-	size += offset_in_page(seg_vaddr);
-
 	/*
 	 * Ensure thread is not attempting to attach its own memory on top
 	 * of itself (i.e. ensure the destination vaddr range doesn't overlap
