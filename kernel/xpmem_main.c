@@ -27,6 +27,7 @@
 #include <linux/moduleparam.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
+#include <linux/huge_mm.h>
 #include <linux/file.h>
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
@@ -383,7 +384,8 @@ static struct file_operations xpmem_fops = {
 	.open = xpmem_open,
 	.flush = xpmem_flush,
 	.unlocked_ioctl = xpmem_ioctl,
-	.mmap = xpmem_mmap
+	.mmap = xpmem_mmap,
+	.get_unmapped_area = thp_get_unmapped_area
 };
 
 static struct miscdevice xpmem_dev_handle = {
