@@ -279,25 +279,24 @@ void
 xpmem_unpin_pages(struct xpmem_segment *seg, struct mm_struct *mm,
 			u64 vaddr, size_t size)
 {
-	int n_pgs = num_of_pages(vaddr, size);
+	u64 end = vaddr + size;
 	int n_pgs_unpinned = 0;
 	struct page *page;
 	u64 pfn, vsize = 0;
 	pte_t *pte = NULL;
 
-	XPMEM_DEBUG("vaddr=%llx, size=%lx, n_pgs=%d", vaddr, size, n_pgs);
+	XPMEM_DEBUG("vaddr=%llx, size=%lx, end=%llx", vaddr, size, end);
 
-	/* Round down to the nearest page aligned address */
+	/* Round down to the nearest base page aligned address */
 	vaddr &= PAGE_MASK;
 
-	while (n_pgs > 0) {
+	while (vaddr < end) {
 		pte = xpmem_vaddr_to_pte(mm, vaddr, NULL, &vsize);
-
 		if (pte) {
 			DBUG_ON(!pte_present(*pte));
 			pfn = pte_pfn(*pte);
-			XPMEM_DEBUG("pfn=%llx, vaddr=%llx, n_pgs=%d",
-					pfn, vaddr, n_pgs);
+			XPMEM_DEBUG("pfn=%llx, vaddr=%llx, n_pgs_unpinned=%d",
+					pfn, vaddr, n_pgs_unpinned);
 			page = virt_to_page(__va(pfn << PAGE_SHIFT));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
 			put_page(page);
@@ -305,21 +304,14 @@ xpmem_unpin_pages(struct xpmem_segment *seg, struct mm_struct *mm,
 			page_cache_release(page);
 #endif
 			n_pgs_unpinned++;
-			vaddr += PAGE_SIZE;
-			n_pgs--;
-		} else {
-			/*
-			 * vsize holds the memory size we know isn't mapped,
-			 * based on which level of the page tables had an
-			 * invalid entry. We round up to the nearest address
-			 * that could have valid pages and find how many pages
-			 * we skipped.
-			 */
-			vsize = ((vaddr + vsize) & (~(vsize - 1)));
-			n_pgs -= (vsize - vaddr)/PAGE_SIZE;
-			vaddr = vsize;
-		}
-	}
+			}
+
+		/* vsize holds the size of the page at address vaddr. We use
+		 * this to round up vaddr to find out how many base pages we
+		 * unpinned (pte != NULL) or skipped (pte == NULL)
+		 */
+		vaddr = ((vaddr + vsize) & (~(vsize - 1)));
+				}
 
 	atomic_sub(n_pgs_unpinned, &seg->tg->n_pinned);
 	atomic_add(n_pgs_unpinned, &xpmem_my_part->n_unpinned);
