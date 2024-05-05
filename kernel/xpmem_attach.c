@@ -263,7 +263,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	}
 
 	atomic_inc(&att->pfcnt);
-	XPMEM_DEBUG("pfs on vaddr %llx: %d", vaddr, atomic_read(&att->pfcnt));
+	XPMEM_DEBUG("# pfs on seg = %d", atomic_read(&att->pfcnt));
 
 	xpmem_att_ref(att);
 	ap = att->ap;
@@ -332,10 +332,12 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	/* translate the fault virtual address to the source virtual address */
 	seg_vaddr = (att->vaddr & PAGE_MASK) + (vaddr - att->at_vaddr);
-	XPMEM_DEBUG("vaddr = %llx, seg_vaddr = %llx", vaddr, seg_vaddr);
+	XPMEM_DEBUG("vaddr = %llx, seg_vaddr = %llx, write = %d", vaddr,
+		    seg_vaddr, write);
 
 	valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write, &page, &pfn,
 					    &seg_tg_mmap_sem_locked);
+	XPMEM_DEBUG("PFN = %lx, locked = %d", pfn, seg_tg_mmap_sem_locked);
 
 	ret = VM_FAULT_SIGBUS;
 
@@ -863,6 +865,7 @@ xpmem_detach_att(struct xpmem_access_permit *ap, struct xpmem_attachment *att)
 	DBUG_ON((vma->vm_end - vma->vm_start) != att->at_size);
 	DBUG_ON(vma->vm_private_data != att);
 
+	XPMEM_DEBUG("unpin at %llx", att->at_vaddr);
 	xpmem_unpin_pages(ap->seg, mm, att->at_vaddr, att->at_size);
 
 	vma->vm_private_data = NULL;

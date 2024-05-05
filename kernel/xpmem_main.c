@@ -379,13 +379,23 @@ xpmem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return -ENOIOCTLCMD;
 }
 
+unsigned long xpmem_get_unmapped_area(struct file *filp, unsigned long addr,
+		unsigned long len, unsigned long pgoff, unsigned long flags)
+{
+	unsigned long ret;
+	ret = thp_get_unmapped_area(filp, addr, len, pgoff, flags);
+	XPMEM_DEBUG("thp_get_unmapped_area(%lu, %lu, %lu) = %lu", addr, len,
+		    pgoff, ret);
+	return ret;
+}
+
 static struct file_operations xpmem_fops = {
 	.owner = THIS_MODULE,
 	.open = xpmem_open,
 	.flush = xpmem_flush,
 	.unlocked_ioctl = xpmem_ioctl,
 	.mmap = xpmem_mmap,
-	.get_unmapped_area = thp_get_unmapped_area
+	.get_unmapped_area = xpmem_get_unmapped_area,
 };
 
 static struct miscdevice xpmem_dev_handle = {

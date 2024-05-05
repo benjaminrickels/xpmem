@@ -83,8 +83,8 @@ xpmem_invalidate_range(struct mmu_notifier *mn,
 
 	seg_tg = container_of(mn, struct xpmem_thread_group, mmu_not);
 
-	XPMEM_DEBUG("xpmem_invalidate_range (%p, %p, %lu, %lu)", mn, mm,
-		    start, end);
+	XPMEM_DEBUG("mn = %p, mm = %p, start = %lx, end = %lx, event = %d",
+		    mn, mm, start, end, mnr->event);
 
 	/*
 	 * This invalidate callout came from a destination address space
