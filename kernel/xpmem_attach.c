@@ -18,6 +18,7 @@
 
 #include <linux/err.h>
 #include <linux/mm.h>
+#include <linux/pfn_t.h>
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/slab.h>
@@ -187,6 +188,20 @@ static inline void lock_seg_tg_mmap_sem(struct xpmem_thread_group *seg_tg,
 	}
 }
 
+/* Check whether we can insert the page's PFN into the PMD */
+static inline int check_insert_pmd(struct page *page, u64 vaddr, u64 seg_vaddr,
+				   struct xpmem_attachment *att) {
+	struct folio *folio = page_folio(page);
+	u64 hvaddr = vaddr & HPAGE_MASK, seg_hvaddr = seg_vaddr & HPAGE_MASK,
+	    hvaddr_off = vaddr - hvaddr,
+	    seg_hvaddr_off = seg_vaddr - seg_hvaddr;
+
+	return folio_test_transhuge(folio) && (hvaddr_off == seg_hvaddr_off) &&
+	       (att->at_vaddr <= hvaddr) && (att->vaddr <= seg_hvaddr) &&
+	       (hvaddr + HPAGE_SIZE <= att->at_vaddr + att->at_size) &&
+	       (seg_hvaddr + HPAGE_SIZE <= att->vaddr + att->ap->seg->size);
+}
+
 /* Check whether the vma of current->mm at vaddr still corresponds to att */
 static inline int verify_vma_valid(u64 vaddr, struct xpmem_attachment *att) {
 	struct vm_area_struct *retry_vma;
@@ -226,7 +241,9 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
         u64 vaddr = (u64)(uintptr_t) vmf->virtual_address;
 #endif
 	u64 seg_vaddr;
+	struct page *page;
 	unsigned long pfn = 0, old_pfn = 0;
+	pfn_t pfnt;
 	struct xpmem_thread_group *ap_tg, *seg_tg;
 	struct xpmem_access_permit *ap;
 	struct xpmem_attachment *att;
@@ -317,7 +334,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	seg_vaddr = (att->vaddr & PAGE_MASK) + (vaddr - att->at_vaddr);
 	XPMEM_DEBUG("vaddr = %llx, seg_vaddr = %llx", vaddr, seg_vaddr);
 
-	valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write, &pfn,
+	valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write, &page, &pfn,
 					    &seg_tg_mmap_sem_locked);
 
 	ret = VM_FAULT_SIGBUS;
@@ -347,12 +364,6 @@ out_1:
 	if (!valid_PFN || !seg_tg_mmap_sem_locked)
 		goto out;
 
-	/*
-	 * remap_pfn_range() does not allow racing threads to each insert
-	 * the PFN for a given virtual address.  To account for this, we
-	 * call remap_pfn_range() with the att->mutex locked and don't
-	 * perform the redundant remap_pfn_range() when a PFN already exists.
-	 */
         if (pfn && pfn_valid(pfn)) {
 		old_pfn = xpmem_vaddr_to_PFN(current->mm, vaddr);
 		if (old_pfn) {
@@ -371,21 +382,55 @@ out_1:
 #endif
 			atomic_dec(&seg->tg->n_pinned);
 			atomic_inc(&xpmem_my_part->n_unpinned);
-			goto out;
+
+			/* Skip the insert if we have a valid PFN and it is a
+			 * read fault */
+			if (!write)
+				goto out;
 		}
 
-		atomic_inc(&att->remapcnt);
-		XPMEM_DEBUG("calling remap_pfn_range() vaddr=%llx, pfn=%lx: %d",
-				vaddr, pfn, atomic_read(&att->remapcnt));
-		
-		ret = remap_pfn_range(vma, vaddr, pfn, PAGE_SIZE,
-				      vma->vm_page_prot);
-		if (!ret) {
-			ret = VM_FAULT_NOPAGE;
+		if (!check_insert_pmd(page, vaddr, seg_vaddr, att)) {
+			/* We add PNF_SPECIAL here so we can use
+			 * vmf_insert_mixed*() to insert the PFN into the
+			 * our attachement VMA which is marked VM_PFNMAP.
+			 * Without it, is_mixed_ok() fails. Changing the VMA
+			 * to VM_MIXEDMAP does *not* work, as it causes a kernel
+			 * lockup when accessing/deleting /dev/shm and hugetlbfs
+			 * backed memory (which I wasn't able to properly
+			 * debug). Oh well, VM_PFNMAP *is* correct for our VMA
+			 * anyways... */
+			pfnt = __pfn_to_pfn_t(pfn, PFN_DEV | PFN_SPECIAL);
+			XPMEM_DEBUG("vmf_insert_mixed*(), vaddr = %llx, "
+				    "pfn = %lx, write = %d",
+				    vaddr, pfn, write);
+
+			/* We use vmf_insert_mixed*() here instead of
+			 * vmf_insert_pfn() as the latter provides no way to
+			 * specify mkwrite when inserting. As they are
+			 * semantically equivalent (modulo the PNF_SPECIAL
+			 * requirement for vmf_insert_mixed*() explained above),
+			 * this should not be a problem however. */
+			if (write)
+				ret = vmf_insert_mixed_mkwrite(vma, vaddr,
+							       pfnt);
+			else
+				ret = vmf_insert_mixed(vma, vaddr, pfnt);
+		} else {
+			pfn = page_to_pfn(compound_head(page));
+			pfnt = __pfn_to_pfn_t(pfn, PFN_DEV);
+			XPMEM_DEBUG("vmf_insert_pfn_pmd(), vaddr = %llx, "
+				    "pfn = %lx, write = %d",
+				    vaddr, pfn, write);
+
+			ret = vmf_insert_pfn_pmd(vmf, pfnt, write);
 		}
-		else {
-			ret = VM_FAULT_SIGBUS;
-			XPMEM_DEBUG("remap_pfn_range() failed %d", ret);
+
+		if (ret & VM_FAULT_ERROR) {
+			XPMEM_DEBUG("inserting pfn failed");
+		} else {
+			atomic_inc(&att->remapcnt);
+			XPMEM_DEBUG("# vmf inserts on seg = %d",
+				    atomic_read(&att->remapcnt));
 		}
 	}
 out:
@@ -424,10 +469,52 @@ out:
 	return ret;
 }
 
+vm_fault_t xpmem_huge_fault_handler(struct vm_fault *vmf, unsigned int order)
+{
+	XPMEM_DEBUG("addr = %lx, order = %u, pmd = %p, pud = %p",
+		    vmf->address, order, vmf->pmd, vmf->pud);
+
+	/* Currently, xpmem_huge_fault_handler() can only be called as the
+	 * result of a mkwrite fault, as create_huge_pmd() will currently not be
+	 * called on a missing fault, due to the checks in hugepage_vma_check().
+	 * Therefore, simply use xpmem_fault_handler() which will do the correct
+	 * thing when called on a hugepage backed address. If the source address
+	 * is no longer hugepage backed, a MMU notifier should have cleared the
+	 * relevant parts of the page table and xpmem_fault_handler() will be
+	 * called directly.
+	 *
+	 * This has changed in v6.8 however, which now allows VMAs with
+	 * ->huge_fault defined to handle missing faults. We would need to
+	 * generalize the page-fault function to be able to return
+	 * VM_FAULT_FALLBACK in the non-hugepage-backed case to handle this. */
+	return xpmem_fault_handler(vmf);
+}
+
+vm_fault_t xpmem_pfn_mkwrite_handler(struct vm_fault *vmf)
+{
+	vm_fault_t ret;
+
+	XPMEM_DEBUG("addr = %lx", vmf->address);
+
+	/* We just handle xpmem_pfn_mkwrite_handler() as a regular write fault
+	 * and handle the mkwrite part when (re)inserting the PFN */
+	ret = xpmem_fault_handler(vmf);
+
+	if (ret & VM_FAULT_ERROR)
+		return ret;
+
+	/* We need VM_FAULT_NOPAGE here, even on VM_FAULT_RETRY, as
+	 * wp_pfn_shared() does not check for this and would otherwise call
+	 * finish_mkwrite_fault() */
+	return ret | VM_FAULT_NOPAGE;
+}
+
 struct vm_operations_struct xpmem_vm_ops = {
 	.open = xpmem_open_handler,
 	.close = xpmem_close_handler,
-	.fault = xpmem_fault_handler
+	.huge_fault = xpmem_huge_fault_handler,
+	.fault = xpmem_fault_handler,
+	.pfn_mkwrite = xpmem_pfn_mkwrite_handler,
 };
 
 /*
@@ -443,8 +530,13 @@ xpmem_mmap(struct file *file, struct vm_area_struct *vma)
 	 * unmapped. Since file is of no interest in XPMEM's case, we ensure
 	 * vm_file is empty and do the fput() here.
 	 */
-	vma->vm_file = NULL;
-	fput(file);
+	/* keep the file here because not having it causes zap_huge_pmd() to
+	 * decrease MM_FILEPAGES counter by HPAGE_PMD_NR (as
+	 * vma_is_special_huge() always returns false if vma->vm_file == NULL,
+	 * even with VM_PFNMAP set) and check_mm() to report "Bad rss-counter
+	 * state" */
+	/* vma->vm_file = NULL;
+	 * fput(file); */
 
 	vma->vm_ops = &xpmem_vm_ops;
 	return 0;

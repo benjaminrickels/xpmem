@@ -160,7 +160,7 @@ xpmem_vaddr_to_pte(struct mm_struct *mm, u64 vaddr, u64 *offset, u64 *size)
 	else if (pud_is_huge(*pud)) {
 		/* pte folded into the pmd which is folded into the pud */
 		pte = xpmem_hugetlb_pte((pte_t *) pud, mm, vaddr, offset);
-				return pte;
+		return pte;
 	}
 #endif
 
@@ -169,11 +169,11 @@ xpmem_vaddr_to_pte(struct mm_struct *mm, u64 vaddr, u64 *offset, u64 *size)
 	pmd = pmd_offset(pud, vaddr);
 	if (!pmd_present(*pmd))
 		return NULL;
-	#if CONFIG_HUGETLB_PAGE
+#if CONFIG_HUGETLB_PAGE
 	else if (pmd_is_huge(*pmd)) {
 		/* pte folded into the pmd */
 		pte = xpmem_hugetlb_pte((pte_t *) pmd, mm, vaddr, offset);
-				return pte;
+		return pte;
 	}
 #endif
 
@@ -196,10 +196,9 @@ xpmem_vaddr_to_pte(struct mm_struct *mm, u64 vaddr, u64 *offset, u64 *size)
 static int
 xpmem_pin_page(struct xpmem_thread_group *tg, struct task_struct *src_task,
 	       struct mm_struct *src_mm, u64 vaddr, int write,
-	       unsigned long *pfn, int *locked)
+	       struct page **page, unsigned long *pfn, int *locked)
 {
 	int ret;
-	struct page *page;
 	struct vm_area_struct *vma;
 	cpumask_t saved_mask = CPU_MASK_NONE;
 	int foll_write = 0;
@@ -241,29 +240,29 @@ xpmem_pin_page(struct xpmem_thread_group *tg, struct task_struct *src_task,
 
 	/* get_user_pages()/get_user_pages_remote() faults and pins the page */
 #if     LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-	ret = get_user_pages_remote (src_mm, vaddr, 1, foll_write, &page,
+	ret = get_user_pages_remote (src_mm, vaddr, 1, foll_write, page,
 				     locked);
 #elif   LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-	ret = get_user_pages_remote (src_mm, vaddr, 1, foll_write, &page, NULL,
+	ret = get_user_pages_remote (src_mm, vaddr, 1, foll_write, page, NULL,
 				     locked);
 #elif   LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
 	ret = get_user_pages_remote (src_task, src_mm, vaddr, 1, foll_write,
-				     &page, NULL, locked);
+				     page, NULL, locked);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
 	ret = get_user_pages_remote (src_task, src_mm, vaddr, 1, foll_write,
-				     &page, NULL);
+				     page, NULL);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0)
 	ret = get_user_pages_remote (src_task, src_mm, vaddr, 1, foll_write, 0,
-				     &page, NULL);
+				     page, NULL);
 #else
-	ret = get_user_pages (src_task, src_mm, vaddr, 1, foll_write, 0, &page,
+	ret = get_user_pages (src_task, src_mm, vaddr, 1, foll_write, 0, page,
 			      NULL);
 #endif
 	if (!cpumask_empty(&saved_mask))
 		set_cpus_allowed_ptr(current, &saved_mask);
 
 	if (ret == 1) {
-		*pfn = page_to_pfn(page);
+		*pfn = page_to_pfn(*page);
 		atomic_inc(&tg->n_pinned);
 		atomic_inc(&xpmem_my_part->n_pinned);
 		ret = 0;
@@ -304,14 +303,14 @@ xpmem_unpin_pages(struct xpmem_segment *seg, struct mm_struct *mm,
 			page_cache_release(page);
 #endif
 			n_pgs_unpinned++;
-			}
+		}
 
 		/* vsize holds the size of the page at address vaddr. We use
 		 * this to round up vaddr to find out how many base pages we
 		 * unpinned (pte != NULL) or skipped (pte == NULL)
 		 */
 		vaddr = ((vaddr + vsize) & (~(vsize - 1)));
-				}
+	}
 
 	atomic_sub(n_pgs_unpinned, &seg->tg->n_pinned);
 	atomic_add(n_pgs_unpinned, &xpmem_my_part->n_unpinned);
@@ -322,7 +321,7 @@ xpmem_unpin_pages(struct xpmem_segment *seg, struct mm_struct *mm,
  */
 int
 xpmem_ensure_valid_PFN(struct xpmem_segment *seg, u64 vaddr, int write,
-		       unsigned long *pfn, int *locked)
+		       struct page **page, unsigned long *pfn, int *locked)
 {
   int ret;
 	struct xpmem_thread_group *seg_tg = seg->tg;
@@ -333,7 +332,7 @@ xpmem_ensure_valid_PFN(struct xpmem_segment *seg, u64 vaddr, int write,
 
 	/* pin PFN */
 	ret = xpmem_pin_page(seg_tg, seg_tg->group_leader, seg_tg->mm, vaddr,
-			     write, pfn, locked);
+			     write, page, pfn, locked);
 
 	return ret;
 }
