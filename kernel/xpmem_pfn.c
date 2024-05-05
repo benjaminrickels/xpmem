@@ -131,68 +131,62 @@ xpmem_vaddr_to_pte(struct mm_struct *mm, u64 vaddr, u64 *offset, u64 *size)
 	 * offset 0 in the page. */
 	*offset = 0;
 
-	/* init size with 0, will only be used if we return NULL */
-	*size = 0;
+	*size = PGDIR_SIZE;
 
 	pgd = pgd_offset(mm, vaddr);
-	if (!pgd_present(*pgd)) {
-		*size = PGDIR_SIZE;
+	if (!pgd_present(*pgd))
 		return NULL;
-	}
+	
 	/* NTH: there is no pgd_large in kernel 3.13. from what I have read
 	 * the pte is never folded into the pgd. */
+
+*size = P4D_SIZE;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 	/* 4.12+ has another level to the page tables */
 	p4d = p4d_offset(pgd, vaddr);
-	if (!p4d_present(*p4d)) {
-		*size = P4D_SIZE;
+	if (!p4d_present(*p4d))
 		return NULL;
-        }
+        
+	*size = PUD_SIZE;
 
 	pud = pud_offset(p4d, vaddr);
 #else
 	pud = pud_offset(pgd, vaddr);
 #endif
-	if (!pud_present(*pud)) {
-		*size = PUD_SIZE;
+	if (!pud_present(*pud))
 		return NULL;
-	}
-#if CONFIG_HUGETLB_PAGE
+	#if CONFIG_HUGETLB_PAGE
 	else if (pud_is_huge(*pud)) {
 		/* pte folded into the pmd which is folded into the pud */
 		pte = xpmem_hugetlb_pte((pte_t *) pud, mm, vaddr, offset);
-		if (!pte)
-			*size = PUD_SIZE;
-		return pte;
+				return pte;
 	}
 #endif
 
+	*size = PMD_SIZE;
+
 	pmd = pmd_offset(pud, vaddr);
-	if (!pmd_present(*pmd)) {
-		*size = PMD_SIZE;
+	if (!pmd_present(*pmd))
 		return NULL;
-	}
-#if CONFIG_HUGETLB_PAGE
+	#if CONFIG_HUGETLB_PAGE
 	else if (pmd_is_huge(*pmd)) {
 		/* pte folded into the pmd */
 		pte = xpmem_hugetlb_pte((pte_t *) pmd, mm, vaddr, offset);
-		if (!pte)
-			*size = PMD_SIZE;
-		return pte;
+				return pte;
 	}
 #endif
+
+	*size = PAGE_SIZE;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	pte = pte_offset_kernel(pmd, vaddr);
 #else
 	pte = pte_offset_map(pmd, vaddr);
 #endif
-	if (!pte_present(*pte)) {
-		*size = PAGE_SIZE;
+	if (!pte_present(*pte))
 		return NULL;
-	}
-
+	
 	return pte;
 }
 
