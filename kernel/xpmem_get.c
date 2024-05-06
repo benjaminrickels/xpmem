@@ -108,8 +108,9 @@ xpmem_get(xpmem_segid_t segid, int flags, int permit_type, void *permit_value,
 	if (segid <= 0)
 		return -EINVAL;
 
-	if ((flags & ~XPMEM_MODE_FLAGS) ||
-	    (flags & XPMEM_ACCESS) == XPMEM_ACCESS)
+	if ((flags & ~(XPMEM_RDONLY | XPMEM_RDWR)) ||
+	    (flags & (XPMEM_RDONLY | XPMEM_RDWR)) ==
+	    (XPMEM_RDONLY | XPMEM_RDWR))
 		return -EINVAL;
 
 	if (permit_type != XPMEM_PERMIT_MODE || permit_value != NULL)

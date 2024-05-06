@@ -278,7 +278,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		return VM_FAULT_SIGBUS;
 	}
 	DBUG_ON(current->tgid != ap_tg->tgid);
-	DBUG_ON((ap->mode & XPMEM_ACCESS) != XPMEM_RDWR);
+	DBUG_ON(ap->mode != XPMEM_RDWR);
 
 	seg = ap->seg;
 	xpmem_seg_ref(seg);

@@ -63,7 +63,6 @@ struct xpmem_addr {
  */
 #define XPMEM_RDONLY	0x1
 #define XPMEM_RDWR	0x2
-#define XPMEM_UNIVERSAL	0x4
 
 /*
  * Valid permit_type values for xpmem_make().
@@ -127,10 +126,7 @@ int xpmem_remove (xpmem_segid_t segid);
 /**
  * xpmem_get - obtain permission to attach memory
  * @segid: IN: segment ID returned from a previous xpmem_make() call
- * @flags: IN: read-write (XPMEM_RDWR) xor read-only (XPMEM_RDONLY), and
- * 	optionally universal access grant (XPMEM_UNIVERSAL) when called from
- * 	source process to allow all consumers to attach using the returned
- * 	access permit
+ * @flags: IN: read-write (XPMEM_RDWR) or read-only (XPMEM_RDONLY)
  * @permit_type: IN: only XPMEM_PERMIT_MODE currently defined
  * @permit_value: IN: permissions mode expressed as an octal value
  * Description:
@@ -139,9 +135,6 @@ int xpmem_remove (xpmem_segid_t segid);
  *	Called by the consumer process to get permission to attach memory from
  *	the source virtual address space associated with this segid. If access
  *	is granted, an apid will be returned to pass to xpmem_attach().
- *	If the XPMEM_UNIVERSAL flag is specified this function can also be
- * 	called from the source process to obtain an access permit that can be
- * 	passed to and used by all consumer processes to attach the segment.
  * Return Value:
  *	Success: 64-bit access permit ID (xpmem_apid_t)
  *	Failure: -1
