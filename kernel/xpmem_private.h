@@ -200,6 +200,8 @@ struct xpmem_segment {
 	int permit_type;	/* permission scheme */
 	void *permit_value;	/* permission data */
 	volatile int flags;	/* seg attributes and state */
+	atomic_t n_pf_blockers;			/* #of PF blockers */
+	wait_queue_head_t unblock_pfs_wq;	/* wait for PFs to unblock */
 	atomic_t refcnt;	/* references to seg */
 	wait_queue_head_t destroyed_wq;	/* wait for seg to be destroyed */
 	struct xpmem_thread_group *tg;	/* creator tg */
@@ -269,6 +271,7 @@ struct xpmem_partition {
 extern int xpmem_make(u64, size_t, int, void *, xpmem_segid_t *);
 extern void xpmem_remove_segs_of_tg(struct xpmem_thread_group *);
 extern int xpmem_remove(xpmem_segid_t);
+extern int xpmem_block_pfs_common(xpmem_segid_t, int);
 
 /* found in xpmem_get.c */
 extern int xpmem_get(xpmem_segid_t, int, int, void *, xpmem_apid_t *);

@@ -105,6 +105,7 @@ xpmem_make(u64 vaddr, size_t size, int permit_type, void *permit_value,
 	seg->size = size;
 	seg->permit_type = permit_type;
 	seg->permit_value = permit_value;
+	init_waitqueue_head(&seg->unblock_pfs_wq);
 	init_waitqueue_head(&seg->destroyed_wq);
 	seg->tg = seg_tg;
 	INIT_LIST_HEAD(&seg->ap_list);
@@ -222,4 +223,54 @@ xpmem_remove(xpmem_segid_t segid)
 	xpmem_tg_deref(seg_tg);
 
 	return 0;
+}
+
+static int xpmem_block_pfs(struct xpmem_segment *seg)
+{
+	atomic_inc(&seg->n_pf_blockers);
+	return 0;
+}
+
+static int xpmem_unblock_pfs(struct xpmem_segment *seg)
+{
+	if (atomic_read(&seg->n_pf_blockers) == 0) {
+		return -EPERM;
+	}
+
+	if (atomic_dec_return(&seg->n_pf_blockers) == 0)
+		wake_up(&seg->unblock_pfs_wq);
+
+	return 0;
+}
+
+int xpmem_block_pfs_common(xpmem_segid_t segid, int block)
+{
+	struct xpmem_thread_group *tg;
+	struct xpmem_segment *seg;
+	int ret;
+
+	tg = xpmem_tg_ref_by_tgid(current->tgid);
+	if (IS_ERR(tg))
+		return PTR_ERR(tg);
+
+	seg = xpmem_seg_ref_by_segid(tg, segid);
+	if (IS_ERR(seg)) {
+		xpmem_tg_deref(tg);
+		return PTR_ERR(seg);
+	}
+
+	/* we take the write lock to ensure that all page faults have finished
+	 * or at least unblocked (i.e. due to userfault delivery) */
+	xpmem_mmap_write_lock(tg->mm);
+
+	if (block)
+		ret = xpmem_block_pfs(seg);
+	else
+		ret = xpmem_unblock_pfs(seg);
+
+	xpmem_mmap_write_unlock(tg->mm);
+
+	xpmem_seg_deref(seg);
+	xpmem_tg_deref(tg);
+	return ret;
 }

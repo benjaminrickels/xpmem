@@ -149,6 +149,17 @@ int xpmem_detach(void *vaddr)
 	return 0;
 }
 
+int xpmem_block_pfs(xpmem_segid_t segid, int block)
+{
+	struct xpmem_cmd_block_pfs block_pfs_info;
+	block_pfs_info.segid = segid;
+	block_pfs_info.block = block;
+
+	if (xpmem_ioctl(XPMEM_CMD_BLOCK_PFS, &block_pfs_info) == -1)
+		return -1;
+	return 0;
+}
+
 int xpmem_version(void)
 {
 	return xpmem_ioctl(XPMEM_CMD_VERSION, NULL);

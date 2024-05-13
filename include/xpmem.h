@@ -193,6 +193,23 @@ void *xpmem_attach (struct xpmem_addr addr, size_t size, void *vaddr);
  */
 int xpmem_detach (void *vaddr);
 
+/**
+ * xpmem_block_pfs - block or unblock page faults to a segment
+ * @segid: IN: the segment which should block page faults
+ * @block: IN: block or unblock page faults?
+ * Description:
+ *  Block or unblock page faults to the specified segment. Function will block
+ *  until page faults could successfully be blocked.
+ * Context:
+ *  Can be called to temporarily block page faults to the specified segment.
+ *  Intended to be used with userfaultfd. A source process can block page
+ *  faults, mmap() over and/or register a region of the segment with
+ *  userfaultfd, and then unblock page faults to not miss any events.
+ * Return Value:
+ *  Success: 0
+ *  Failure: -1*/
+int xpmem_block_pfs(xpmem_segid_t segid, int block);
+
 #ifdef __cplusplus
 }
 #endif

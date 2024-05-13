@@ -170,6 +170,53 @@ out:
 	}
 }
 
+static inline void lock_mmap_sems(struct xpmem_thread_group *tg)
+{
+	if (current->mm < tg->mm) {
+		xpmem_mmap_read_lock(current->mm);
+		xpmem_mmap_read_lock(tg->mm);
+	} else if (tg->mm < current->mm) {
+		xpmem_mmap_read_lock(tg->mm);
+		xpmem_mmap_read_lock(current->mm);
+	} else {
+		/* tg->mm == seg->mm */
+		xpmem_mmap_read_lock(tg->mm);
+	}
+}
+
+static inline void unlock_mmap_sems(struct xpmem_thread_group *tg)
+{
+	if (current->mm != tg->mm) {
+		xpmem_mmap_read_unlock(current->mm);
+		xpmem_mmap_read_unlock(tg->mm);
+	} else {
+		xpmem_mmap_read_unlock(tg->mm);
+	}
+}
+
+/* Wait for XPMEM page faults to unblock. Enter and exit with current->mm's and
+ * seg->tg->mm's mmap locks held for reading */
+static void xpmem_wait_unblock_pfs(struct xpmem_segment *seg,
+				   int *vma_verification_needed)
+{
+	struct xpmem_thread_group *tg = seg->tg;
+
+	/* no blockers, fast out path */
+	if (atomic_read(&seg->n_pf_blockers) == 0)
+		return;
+
+	vma_verification_needed = 1;
+	while (1) {
+		unlock_mmap_sems(tg);
+		wait_event(seg->unblock_pfs_wq,
+			   (atomic_read(&seg->n_pf_blockers) == 0));
+
+		lock_mmap_sems(tg);
+		if (atomic_read(&seg->n_pf_blockers) == 0)
+			break;
+	}
+}
+
 /* Lock mmap_lock of seg_tg->mm. Assumes seg_tg->mm != current->mm */
 static inline void lock_seg_tg_mmap_sem(struct xpmem_thread_group *seg_tg,
 					int *vma_verification_needed) {
@@ -212,6 +259,17 @@ static inline int verify_vma_valid(u64 vaddr, struct xpmem_attachment *att) {
 	       retry_vma->vm_private_data == att;
 }
 
+static void unpin_page(struct xpmem_segment *seg, unsigned long pfn)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
+	put_page(pfn_to_page(pfn));
+#else
+	page_cache_release(pfn_to_page(pfn));
+#endif
+	atomic_dec(&seg->tg->n_pinned);
+	atomic_inc(&xpmem_my_part->n_unpinned);
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 static vm_fault_t
 xpmem_fault_handler(struct vm_fault *vmf)
@@ -229,7 +287,9 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	int ret = 0;
 #endif
 	int att_locked = 0;
-	int seg_tg_mmap_sem_locked = 0, vma_verification_needed = 0;
+	int same_mm;
+	int current_mmap_sem_locked = 1, seg_tg_mmap_sem_locked = 0,
+	    vma_verification_needed = 0;
 	int write = vmf->flags & FAULT_FLAG_WRITE;
 	int valid_PFN = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
@@ -285,7 +345,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	seg_tg = seg->tg;
 	xpmem_tg_ref(seg_tg);
 
-	seg_tg_mmap_sem_locked = (current->mm == seg_tg->mm);
+	same_mm = (current->mm == seg_tg->mm);
 
 	/*
 	 * The faulting thread has its mmap_sem/mmap_lock locked on entrance to this
@@ -309,14 +369,18 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		goto out_1;
 	}
 
-	if (seg_tg->mm != current->mm) {
+	if (!same_mm) {
 		lock_seg_tg_mmap_sem(seg_tg, &vma_verification_needed);
-		seg_tg_mmap_sem_locked = 1;
 	}
+	seg_tg_mmap_sem_locked = 1;
+
+	xpmem_wait_unblock_pfs(seg, &vma_verification_needed);
 
 	/* verify vma hasn't changed due to dropping current->mm->mmap_sem/mmap_lock */
-	if (vma_verification_needed && !verify_vma_valid(vaddr, att))
+	if (vma_verification_needed && !verify_vma_valid(vaddr, att)) {
+		ret = VM_FAULT_SIGBUS;
 		goto out_2;
+	}
 
 	if (mutex_lock_killable(&att->mutex))
 		goto out_2;
@@ -335,26 +399,66 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	XPMEM_DEBUG("vaddr = %llx, seg_vaddr = %llx, write = %d", vaddr,
 		    seg_vaddr, write);
 
+	/* first try to pin the page with retries not allowed */
 	valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write, &page, &pfn,
-					    &seg_tg_mmap_sem_locked);
-	XPMEM_DEBUG("PFN = %lx, locked = %d", pfn, seg_tg_mmap_sem_locked);
+					    NULL);
 
-	ret = VM_FAULT_SIGBUS;
+	/* if this didn't work, try to pin it with retries allowed */
+	if (!valid_PFN) {
+		if (!same_mm) {
+			/* release mmap lock while we are waiting for pagefault
+			* resolution in the source address space */
+			xpmem_mmap_read_unlock(current->mm);
+			current_mmap_sem_locked = 0;
+		}
 
-	if (!valid_PFN)
-		goto out_2;
+		valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write,
+						    &page, &pfn,
+						    &seg_tg_mmap_sem_locked);
 
-	/* VM_FAULT_RETRY triggered in get_user_pages_remote(), so mmap_lock of
-	 * seg_tg->mm was released -> retry this fault as well, as the seg_tg's
-	 * address space might have changed in the meantime and thus pfn might
-	 * no longer correspond to what it originally did
-	 */
-	if (!seg_tg_mmap_sem_locked) {
-		ret = VM_FAULT_RETRY;
+		if (same_mm)
+			current_mmap_sem_locked = seg_tg_mmap_sem_locked;
+	}
+
+	XPMEM_DEBUG("PFN = %lx, current->mm locked = %d, "
+		    "seg_tg->mm locked = %d", pfn, current_mmap_sem_locked,
+		    seg_tg_mmap_sem_locked);
+
+	if (!valid_PFN) {
+		ret = VM_FAULT_SIGBUS;
+
+		/* when we return VM_FAULT_SIGBUS we must first reacquire
+		 * current->mm's mmap lock. we don't care if seg_tg's address
+		 * space changes in this case though, so just release its mmap
+		 * lock (if it isn't already) to avoid deadlocks */
+
+		if(!same_mm && seg_tg_mmap_sem_locked)
+			xpmem_mmap_read_unlock(seg_tg->mm);
+
+		if (!current_mmap_sem_locked)
+			xpmem_mmap_read_lock(current->mm);
+
 		goto out_2;
 	}
 
-	att->flags |= XPMEM_FLAG_VALIDPTEs;
+	/* we did not succeed in pinning the page without retries allowed, so we
+	 * potentially released current->mm mmap lock and/or seg_tg->mm mmap
+	 * lock. if seg_tg->mm's mmap lock wasn't releases, we might still need
+	 * to release it to re-acquire current->mm's mmap lock. thus we retry
+	 * the fault as the pfn might then no longer correspond to what it
+	 * originally did */
+	if (!current_mmap_sem_locked || !seg_tg_mmap_sem_locked) {
+		unpin_page(seg, pfn);
+		ret = VM_FAULT_RETRY;
+
+		if (!same_mm && seg_tg_mmap_sem_locked)
+			xpmem_mmap_read_unlock(seg_tg->mm);
+
+		if(current_mmap_sem_locked)
+			xpmem_mmap_read_unlock(current->mm);
+
+		goto out_2;
+	}
 
 out_2:
 	xpmem_seg_up_read(seg_tg, seg, 1);
@@ -363,8 +467,12 @@ out_1:
 	xpmem_tg_deref(ap_tg);
 
 	/* abort early if SIGBUS or retry is needed */
-	if (!valid_PFN || !seg_tg_mmap_sem_locked)
+	if (ret & (VM_FAULT_SIGBUS | VM_FAULT_RETRY)) {
 		goto out;
+	}
+
+	/* from here one we know that both current->mm's and seg_tg->mm's mmap
+	 * locks are held*/
 
         if (pfn && pfn_valid(pfn)) {
 		old_pfn = xpmem_vaddr_to_PFN(current->mm, vaddr);
@@ -377,13 +485,9 @@ out_1:
 				       "%ld != %ld\n", old_pfn, pfn);
 			}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
-			put_page(pfn_to_page(pfn));
-#else
-			page_cache_release(pfn_to_page(pfn));
-#endif
-			atomic_dec(&seg->tg->n_pinned);
-			atomic_inc(&xpmem_my_part->n_unpinned);
+			/* pfn was valid so we already pinned the page at some
+			 * point */
+			unpin_page(seg, pfn);
 
 			/* Skip the insert if we have a valid PFN and it is a
 			 * read fault */
@@ -430,28 +534,17 @@ out_1:
 		if (ret & VM_FAULT_ERROR) {
 			XPMEM_DEBUG("inserting pfn failed");
 		} else {
+			att->flags |= XPMEM_FLAG_VALIDPTEs;
 			atomic_inc(&att->remapcnt);
 			XPMEM_DEBUG("# vmf inserts on seg = %d",
 				    atomic_read(&att->remapcnt));
 		}
 	}
-out:
-	/* We must unlock seg_tg's mmap semaphore *after* remap_pfn_range(), as
-	 * otherwise we might race with changing mappings in the source mm and
-	 * subsequent MMU notifiers, in which case pfn might no longer
-	 * correspond to what it originally did
-	 */
-	if (current->mm != seg_tg->mm && seg_tg_mmap_sem_locked)
-		xpmem_mmap_read_unlock(seg_tg->mm);
-	
-	/* As noted above, when seg_tg's mmap lock is dropped, we must retry
-	 * this fault by returning VM_FAULT_RETRY. In this case we must also
-	 * drop current's mmap lock as this is what the low-level fault handling
-	 * layer expects
-	 */
-	if (current->mm != seg_tg->mm && (ret & VM_FAULT_RETRY))
-		xpmem_mmap_read_unlock(current->mm);
 
+	if (!same_mm)
+		xpmem_mmap_read_unlock(seg_tg->mm);
+
+out:
 	if (att_locked)
 		mutex_unlock(&att->mutex);
 
@@ -464,7 +557,7 @@ out:
 	if (ret == VM_FAULT_SIGBUS) {
 		XPMEM_DEBUG("fault returning SIGBUS vaddr=%llx, pfn=%lx", vaddr, pfn);
 	}
-	
+
 	if (ret == VM_FAULT_RETRY)
 		XPMEM_DEBUG("retry fault vaddr=%llx, pfn=%lx", vaddr, pfn);
 

@@ -373,6 +373,16 @@ xpmem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case XPMEM_CMD_FORK_END: {
 		return xpmem_fork_end();
 	}
+	case XPMEM_CMD_BLOCK_PFS: {
+		struct xpmem_cmd_block_pfs block_pfs_info;
+
+		if(copy_from_user(&block_pfs_info, (void __user *)arg,
+				  sizeof(struct xpmem_cmd_block_pfs)))
+			return -EFAULT;
+
+		return xpmem_block_pfs_common(block_pfs_info.segid,
+					      block_pfs_info.block);
+	}
 	default:
 		break;
 	}

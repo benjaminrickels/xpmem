@@ -130,6 +130,20 @@ typedef struct xpmem_cmd_detach xpmem_cmd_detach_t;
 #define XPMEM_CMD_FORK_BEGIN _IO('x', 7)
 #define XPMEM_CMD_FORK_END   _IO('x', 8)
 
+/**
+ * Structure to pass data for XPMEM_CMD_BLOCK_PFS ioctl
+ */
+struct xpmem_cmd_block_pfs {
+  /** xpmem segment identifier that should block pagefaults */
+  xpmem_segid_t segid;
+  /** block or unblock XPMEM page faults? */
+  int block;
+};
+typedef struct xpmem_cmd_block_pfs xpmem_cmd_block_pfs_t;
+
+/** ioctl to block or unblock XPMEM page faults for a seg_tg */
+#define XPMEM_CMD_BLOCK_PFS _IO('x', 9)
+
 /*
  * path to XPMEM device
  */
