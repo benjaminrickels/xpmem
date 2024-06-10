@@ -144,6 +144,10 @@ xpmem_remove_seg(struct xpmem_thread_group *seg_tg, struct xpmem_segment *seg)
 		return;
 	}
 	seg->flags |= XPMEM_FLAG_DESTROYING;
+
+	atomic_set(&seg->n_pf_blockers, 0);
+	wake_up(&seg->unblock_pfs_wq);
+
 	spin_unlock(&seg->lock);
 
 	xpmem_seg_down_write(seg);
@@ -262,12 +266,16 @@ int xpmem_block_pfs_common(xpmem_segid_t segid, int block)
 	/* we take the write lock to ensure that all page faults have finished
 	 * or at least unblocked (i.e. due to userfault delivery) */
 	xpmem_mmap_write_lock(tg->mm);
-
-	if (block)
+	spin_lock(&seg->lock);
+	
+	if (seg->flags & (XPMEM_FLAG_DESTROYING | XPMEM_FLAG_DESTROYED))
+		ret = -ESRCH;
+	else if (block)
 		ret = xpmem_block_pfs(seg);
 	else
 		ret = xpmem_unblock_pfs(seg);
-
+	
+	spin_unlock(&seg->lock);
 	xpmem_mmap_write_unlock(tg->mm);
 
 	xpmem_seg_deref(seg);

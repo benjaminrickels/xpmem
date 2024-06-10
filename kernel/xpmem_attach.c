@@ -196,25 +196,21 @@ static inline void unlock_mmap_sems(struct xpmem_thread_group *tg)
 
 /* Wait for XPMEM page faults to unblock. Enter and exit with current->mm's and
  * seg->tg->mm's mmap locks held for reading */
-static void xpmem_wait_unblock_pfs(struct xpmem_segment *seg,
-				   int *vma_verification_needed)
+static int xpmem_wait_unblock_pfs(struct xpmem_segment *seg)
 {
 	struct xpmem_thread_group *tg = seg->tg;
 
 	/* no blockers, fast out path */
 	if (atomic_read(&seg->n_pf_blockers) == 0)
-		return;
+		return 0;
 
-	*vma_verification_needed = 1;
-	while (1) {
-		unlock_mmap_sems(tg);
-		wait_event(seg->unblock_pfs_wq,
-			   (atomic_read(&seg->n_pf_blockers) == 0));
+	unlock_mmap_sems(tg);
+	xpmem_seg_up_read(tg, seg, 1);
+	
+	wait_event(seg->unblock_pfs_wq,
+			(atomic_read(&seg->n_pf_blockers) == 0));
 
-		lock_mmap_sems(tg);
-		if (atomic_read(&seg->n_pf_blockers) == 0)
-			break;
-	}
+	return 1;
 }
 
 /* Lock mmap_lock of seg_tg->mm. Assumes seg_tg->mm != current->mm */
@@ -290,6 +286,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	int same_mm;
 	int current_mmap_sem_locked = 1, seg_tg_mmap_sem_locked = 0,
 	    vma_verification_needed = 0;
+	int seg_sema_locked = 0;
 	int write = vmf->flags & FAULT_FLAG_WRITE;
 	int valid_PFN = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
@@ -368,18 +365,23 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		ret = VM_FAULT_SIGBUS;
 		goto out_1;
 	}
+	seg_sema_locked = 1;
 
 	if (!same_mm) {
 		lock_seg_tg_mmap_sem(seg_tg, &vma_verification_needed);
 	}
 	seg_tg_mmap_sem_locked = 1;
 
-	xpmem_wait_unblock_pfs(seg, &vma_verification_needed);
-
 	/* verify vma hasn't changed due to dropping current->mm->mmap_sem/mmap_lock */
 	if (vma_verification_needed && !verify_vma_valid(vaddr, att)) {
 		ret = VM_FAULT_SIGBUS;
 		goto out_2;
+	}
+
+	if (xpmem_wait_unblock_pfs(seg)) {
+		ret = VM_FAULT_RETRY;
+		seg_sema_locked = 0;
+		goto out_1;
 	}
 
 	if (mutex_lock_killable(&att->mutex))
@@ -405,19 +407,30 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	/* if this didn't work, try to pin it with retries allowed */
 	if (!valid_PFN) {
-		if (!same_mm) {
-			/* release mmap lock while we are waiting for pagefault
-			* resolution in the source address space */
+		/* release mmap lock while we are waiting for pagefault
+		 * resolution in the source address space */
+		if (!same_mm)
 			xpmem_mmap_read_unlock(current->mm);
-			current_mmap_sem_locked = 0;
-		}
+
+		xpmem_seg_up_read(seg_tg, seg, 1);
+		seg_sema_locked = 0;
+
+		mutex_unlock(&att->mutex);
+		att_locked = 0;
 
 		valid_PFN = !xpmem_ensure_valid_PFN(seg, seg_vaddr, write,
 						    &page, &pfn,
 						    &seg_tg_mmap_sem_locked);
 
-		if (same_mm)
-			current_mmap_sem_locked = seg_tg_mmap_sem_locked;
+		if (seg_tg_mmap_sem_locked) {
+			if (!same_mm)
+				xpmem_mmap_read_unlock(seg_tg->mm);
+			else
+				xpmem_mmap_read_unlock(current->mm);
+		}
+
+		seg_tg_mmap_sem_locked = 0;
+		current_mmap_sem_locked = 0;
 	}
 
 	XPMEM_DEBUG("PFN = %lx, current->mm locked = %d, "
@@ -438,13 +451,14 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		if (!current_mmap_sem_locked)
 			xpmem_mmap_read_lock(current->mm);
 
-		goto out_2;
+		if (seg_sema_locked)
+			goto out_2;
+		else
+			goto out_1;
 	}
 
 	/* we did not succeed in pinning the page without retries allowed, so we
-	 * potentially released current->mm mmap lock and/or seg_tg->mm mmap
-	 * lock. if seg_tg->mm's mmap lock wasn't releases, we might still need
-	 * to release it to re-acquire current->mm's mmap lock. thus we retry
+	 * released current->mm mmap lock and seg_tg->mm mmap. thus we retry
 	 * the fault as the pfn might then no longer correspond to what it
 	 * originally did */
 	if (!current_mmap_sem_locked || !seg_tg_mmap_sem_locked) {
@@ -457,7 +471,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 		if(current_mmap_sem_locked)
 			xpmem_mmap_read_unlock(current->mm);
 
-		goto out_2;
+		goto out_1;
 	}
 
 out_2:
