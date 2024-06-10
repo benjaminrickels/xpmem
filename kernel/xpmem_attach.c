@@ -205,7 +205,7 @@ static void xpmem_wait_unblock_pfs(struct xpmem_segment *seg,
 	if (atomic_read(&seg->n_pf_blockers) == 0)
 		return;
 
-	vma_verification_needed = 1;
+	*vma_verification_needed = 1;
 	while (1) {
 		unlock_mmap_sems(tg);
 		wait_event(seg->unblock_pfs_wq,
