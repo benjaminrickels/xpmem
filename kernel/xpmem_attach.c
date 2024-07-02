@@ -239,7 +239,7 @@ static inline int check_insert_pmd(struct page *page, u64 vaddr, u64 seg_vaddr,
 	    hvaddr_off = vaddr - hvaddr,
 	    seg_hvaddr_off = seg_vaddr - seg_hvaddr;
 
-	return folio_test_transhuge(folio) && (hvaddr_off == seg_hvaddr_off) &&
+	return folio_test_large(folio) && (hvaddr_off == seg_hvaddr_off) &&
 	       (att->at_vaddr <= hvaddr) && (att->vaddr <= seg_hvaddr) &&
 	       (hvaddr + HPAGE_SIZE <= att->at_vaddr + att->at_size) &&
 	       (seg_hvaddr + HPAGE_SIZE <= att->vaddr + att->ap->seg->size);
