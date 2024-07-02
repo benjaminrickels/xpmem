@@ -53,6 +53,19 @@ of `autoconf'.
   1. `cd' to the directory containing the package's source code and type
      `./configure' to configure the package for your system.
 
+     To specify a directory for kernel sources, use `--with-kerneldir=`
+     with an *absolute* path. The kernel and its modules must have
+     already been built with `make modules` (the script checks whether
+     `Module.symvers` exists in the specified directory).
+
+     To specify a directory in which to install the kernel module use
+     `--with-module-prefix=path`. The XPMEM module `.ko` can then be
+     found under `<path>/lib/modules/<version>/kernel/xpmem/xpmem.ko`
+     and loaded with `insmod` after compilation.
+
+     A custom kernel version (e.g. obtained from `uname -r`) can be
+     specified via `--with-kernelvers=`.
+
      Running `configure' might take a while.  While running, it prints
      some messages telling which features it is checking for.
 
@@ -362,4 +375,3 @@ operates.
 
 `configure' also accepts some other, not widely useful, options.  Run
 `configure --help' for more details.
-
