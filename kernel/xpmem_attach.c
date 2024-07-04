@@ -29,6 +29,10 @@
 #include <linux/sched/signal.h>
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#include <linux/pgtable.h>
+#endif
+
 static void
 xpmem_open_handler(struct vm_area_struct *vma)
 {
@@ -268,7 +272,7 @@ static void unpin_page(struct xpmem_segment *seg, unsigned long pfn)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 static vm_fault_t
-xpmem_fault_handler(struct vm_fault *vmf)
+xpmem_fault_handler(struct vm_fault *vmf, int pmd_order)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 int
 xpmem_fault_handler(struct vm_fault *vmf)
@@ -300,6 +304,7 @@ xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	u64 seg_vaddr;
 	struct page *page;
 	unsigned long pfn = 0, old_pfn = 0;
+	int insert_pmd = 0;
 	pfn_t pfnt;
 	struct xpmem_thread_group *ap_tg, *seg_tg;
 	struct xpmem_access_permit *ap;
@@ -485,8 +490,16 @@ out_1:
 		goto out;
 	}
 
-	/* from here one we know that both current->mm's and seg_tg->mm's mmap
+	/* from here on we know that both current->mm's and seg_tg->mm's mmap
 	 * locks are held*/
+
+	insert_pmd = check_insert_pmd(page, vaddr, seg_vaddr, att);
+	if (pmd_order && !insert_pmd) {
+		ret = VM_FAULT_FALLBACK;
+		unpin_page(seg, pfn);
+
+		goto out_unlock_seg_tg;
+	}
 
         if (pfn && pfn_valid(pfn)) {
 		old_pfn = xpmem_vaddr_to_PFN(current->mm, vaddr);
@@ -509,7 +522,7 @@ out_1:
 				goto out;
 		}
 
-		if (!check_insert_pmd(page, vaddr, seg_vaddr, att)) {
+		if (!insert_pmd) {
 			/* We add PNF_SPECIAL here so we can use
 			 * vmf_insert_mixed*() to insert the PFN into the
 			 * our attachement VMA which is marked VM_PFNMAP.
@@ -555,6 +568,7 @@ out_1:
 		}
 	}
 
+out_unlock_seg_tg:
 	if (!same_mm)
 		xpmem_mmap_read_unlock(seg_tg->mm);
 
@@ -575,29 +589,44 @@ out:
 	if (ret == VM_FAULT_RETRY)
 		XPMEM_DEBUG("retry fault vaddr=%llx, pfn=%lx", vaddr, pfn);
 
+	if (ret == VM_FAULT_FALLBACK)
+		XPMEM_DEBUG("fault fallback vaddr=%llx, pfn=%lx", vaddr, pfn);
+
 	return ret;
 }
 
+vm_fault_t xpmem_base_fault_handler(struct vm_fault *vmf)
+{
+	XPMEM_DEBUG("addr = %lx, pmd = %p, pud = %p",
+		    vmf->address, vmf->pmd, vmf->pud);
+
+	return xpmem_fault_handler(vmf, 0);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 vm_fault_t xpmem_huge_fault_handler(struct vm_fault *vmf, unsigned int order)
 {
 	XPMEM_DEBUG("addr = %lx, order = %u, pmd = %p, pud = %p",
 		    vmf->address, order, vmf->pmd, vmf->pud);
 
-	/* Currently, xpmem_huge_fault_handler() can only be called as the
-	 * result of a mkwrite fault, as create_huge_pmd() will currently not be
-	 * called on a missing fault, due to the checks in hugepage_vma_check().
-	 * Therefore, simply use xpmem_fault_handler() which will do the correct
-	 * thing when called on a hugepage backed address. If the source address
-	 * is no longer hugepage backed, a MMU notifier should have cleared the
-	 * relevant parts of the page table and xpmem_fault_handler() will be
-	 * called directly.
-	 *
-	 * This has changed in v6.8 however, which now allows VMAs with
-	 * ->huge_fault defined to handle missing faults. We would need to
-	 * generalize the page-fault function to be able to return
-	 * VM_FAULT_FALLBACK in the non-hugepage-backed case to handle this. */
-	return xpmem_fault_handler(vmf);
+	if (order == PUD_ORDER)
+		return VM_FAULT_FALLBACK;
+
+	return xpmem_fault_handler(vmf, 1);
 }
+#else
+vm_fault_t
+xpmem_huge_fault_handler(struct vm_fault *vmf, enum page_entry_size pe_size)
+{
+	XPMEM_DEBUG("addr = %lx, pe_size = %d, pmd = %p, pud = %p",
+		    vmf->address, pe_size, vmf->pmd, vmf->pud);
+
+	if (pe_size == PE_SIZE_PUD)
+		return VM_FAULT_FALLBACK;
+
+	return xpmem_fault_handler(vmf, 1);
+}
+#endif
 
 vm_fault_t xpmem_pfn_mkwrite_handler(struct vm_fault *vmf)
 {
@@ -607,7 +636,7 @@ vm_fault_t xpmem_pfn_mkwrite_handler(struct vm_fault *vmf)
 
 	/* We just handle xpmem_pfn_mkwrite_handler() as a regular write fault
 	 * and handle the mkwrite part when (re)inserting the PFN */
-	ret = xpmem_fault_handler(vmf);
+	ret = xpmem_fault_handler(vmf, 0);
 
 	if (ret & VM_FAULT_ERROR)
 		return ret;
@@ -622,7 +651,7 @@ struct vm_operations_struct xpmem_vm_ops = {
 	.open = xpmem_open_handler,
 	.close = xpmem_close_handler,
 	.huge_fault = xpmem_huge_fault_handler,
-	.fault = xpmem_fault_handler,
+	.fault = xpmem_base_fault_handler,
 	.pfn_mkwrite = xpmem_pfn_mkwrite_handler,
 };
 
