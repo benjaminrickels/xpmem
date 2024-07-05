@@ -814,10 +814,10 @@ xpmem_attach(struct file *file, xpmem_apid_t apid, off_t offset, size_t size,
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 	vm_flags_set(vma,
-		VM_DONTCOPY | VM_DONTDUMP | VM_IO | VM_DONTEXPAND | VM_PFNMAP);
+		VM_DONTCOPY | VM_DONTDUMP | VM_IO | VM_DONTEXPAND | VM_PFNMAP | VM_HUGEPAGE);
 #else
 	vma->vm_flags |=
-	    VM_DONTCOPY | VM_DONTDUMP | VM_IO | VM_DONTEXPAND | VM_PFNMAP;
+	    VM_DONTCOPY | VM_DONTDUMP | VM_IO | VM_DONTEXPAND | VM_PFNMAP | VM_HUGEPAGE;
 #endif
 
 	vma->vm_ops = &xpmem_vm_ops;
