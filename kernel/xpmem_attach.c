@@ -595,7 +595,7 @@ out:
 	return ret;
 }
 
-vm_fault_t xpmem_base_fault_handler(struct vm_fault *vmf)
+static vm_fault_t xpmem_base_fault_handler(struct vm_fault *vmf)
 {
 	XPMEM_DEBUG("addr = %lx, pmd = %p, pud = %p",
 		    vmf->address, vmf->pmd, vmf->pud);
@@ -604,7 +604,8 @@ vm_fault_t xpmem_base_fault_handler(struct vm_fault *vmf)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-vm_fault_t xpmem_huge_fault_handler(struct vm_fault *vmf, unsigned int order)
+static vm_fault_t
+xpmem_huge_fault_handler(struct vm_fault *vmf, unsigned int order)
 {
 	XPMEM_DEBUG("addr = %lx, order = %u, pmd = %p, pud = %p",
 		    vmf->address, order, vmf->pmd, vmf->pud);
@@ -615,7 +616,7 @@ vm_fault_t xpmem_huge_fault_handler(struct vm_fault *vmf, unsigned int order)
 	return xpmem_fault_handler(vmf, 1);
 }
 #else
-vm_fault_t
+static vm_fault_t
 xpmem_huge_fault_handler(struct vm_fault *vmf, enum page_entry_size pe_size)
 {
 	XPMEM_DEBUG("addr = %lx, pe_size = %d, pmd = %p, pud = %p",
@@ -628,7 +629,7 @@ xpmem_huge_fault_handler(struct vm_fault *vmf, enum page_entry_size pe_size)
 }
 #endif
 
-vm_fault_t xpmem_pfn_mkwrite_handler(struct vm_fault *vmf)
+static vm_fault_t xpmem_pfn_mkwrite_handler(struct vm_fault *vmf)
 {
 	vm_fault_t ret;
 
